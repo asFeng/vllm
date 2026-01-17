@@ -433,6 +433,7 @@ _MULTIMODAL_MODELS = {
         "qwen2_vl",
         "Tarsier2ForConditionalGeneration",
     ),
+    "TS2QwenForCausalLM": ("ts_qwen", "TS2QwenForCausalLM"),
     "UltravoxModel": ("ultravox", "UltravoxModel"),
     "VoxtralForConditionalGeneration": ("voxtral", "VoxtralForConditionalGeneration"),  # noqa: E501
     "VoxtralStreamingGeneration": ("voxtral_streaming", "VoxtralStreamingGeneration"),  # noqa: E501

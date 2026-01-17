@@ -34,6 +34,7 @@ from .inputs import (
     MultiModalDataDict,
     MultiModalFieldConfig,
     MultiModalKwargsItems,
+    TimeseriesItem,
     VideoItem,
 )
 
@@ -384,6 +385,38 @@ class VideoEmbeddingItems(EmbeddingItems):
         super().__init__(data, "video", expected_hidden_size)
 
 
+class TimeseriesProcessorItems(ProcessorBatchItems[torch.Tensor]):
+    """Processor items for timeseries data."""
+
+    def __init__(self, data: Sequence[torch.Tensor] | None) -> None:
+        if data is None:
+            data = [None]  # type: ignore[list-item]
+        super().__init__(data, "timeseries")
+
+    def get_timeseries_shape(self, item_idx: int) -> tuple[int, int]:
+        """Get (ts_len, num_channels) of the timeseries."""
+        ts = self.get(item_idx)
+        if ts.ndim == 2:
+            return (ts.shape[0], ts.shape[1])
+        raise ValueError(f"Expected 2D timeseries, got shape {ts.shape}")
+
+    def get_processor_data(self) -> Mapping[str, object]:
+        # Override to use "timeseries" not "timeseriess"
+        # (base class adds 's' which doesn't work for "timeseries")
+        return {"timeseries": self.get_all()}
+
+
+class TimeseriesEmbeddingItems(EmbeddingItems):
+    """Embedding items for timeseries data."""
+
+    def __init__(
+        self,
+        data: torch.Tensor | list[torch.Tensor],
+        expected_hidden_size: int | None = None,
+    ) -> None:
+        super().__init__(data, "timeseries", expected_hidden_size)
+
+
 _D = TypeVar("_D", bound=ModalityDataItems[Any, Any])
 
 
@@ -652,11 +685,79 @@ class MultiModalDataParser:
 
         return VideoProcessorItems(new_videos, metadata=metadata_lst)
 
+    def _is_timeseries_embeddings(
+        self, data: object
+    ) -> TypeGuard[torch.Tensor | list[torch.Tensor]]:
+        """
+        Check if timeseries data represents embeddings.
+
+        For timeseries, raw input is 2D (ts_len, channels).
+        Embeddings are either:
+        - 3D tensor (batch, seq_len, hidden_size)
+        - List of 2D tensors where hidden_size is large (> 100)
+
+        This is different from generic is_embeddings because timeseries
+        raw data is 2D, not images/audio which have different raw formats.
+        """
+        if isinstance(data, torch.Tensor):
+            # 3D tensor is definitely embeddings
+            return data.ndim == 3
+        if is_list_of(data, torch.Tensor):
+            first = data[0]  # type: ignore[index]
+            if first.ndim == 3:
+                return True
+            # For 2D tensors, check if second dim looks like hidden_size
+            # Raw timeseries has small channel count (e.g., 5),
+            # embeddings have large hidden_size (e.g., 896+)
+            if first.ndim == 2 and first.shape[-1] > 100:
+                return True
+            return False
+        return False
+
+    def _parse_timeseries_data(
+        self,
+        data: ModalityData[TimeseriesItem],
+    ) -> ModalityDataItems[Any, Any] | None:
+        if data is None:
+            return TimeseriesProcessorItems(None)
+
+        if self._is_empty(data):
+            return None
+
+        if self._is_timeseries_embeddings(data):
+            return TimeseriesEmbeddingItems(data, self.expected_hidden_size)
+
+        data_items: list[torch.Tensor]
+        if isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 2:
+            # Single timeseries: (ts_len, num_channels)
+            if isinstance(data, np.ndarray):
+                data = torch.from_numpy(data)
+            data_items = [data]
+        elif isinstance(data, (np.ndarray, torch.Tensor)) and data.ndim == 3:
+            # Batch of timeseries: (batch, ts_len, num_channels)
+            if isinstance(data, np.ndarray):
+                data = torch.from_numpy(data)
+            data_items = [elem for elem in data]
+        elif isinstance(data, list):
+            data_items = []
+            for item in data:
+                if isinstance(item, np.ndarray):
+                    data_items.append(torch.from_numpy(item))
+                elif isinstance(item, torch.Tensor):
+                    data_items.append(item)
+                else:
+                    raise ValueError(f"Unsupported timeseries type: {type(item)}")
+        else:
+            raise ValueError(f"Unsupported timeseries data format: {type(data)}")
+
+        return TimeseriesProcessorItems(data_items)
+
     def _get_subparsers(self) -> Mapping[str, ModalityDataParser]:
         return {
             "audio": self._parse_audio_data,
             "image": self._parse_image_data,
             "video": self._parse_video_data,
+            "timeseries": self._parse_timeseries_data,
         }
 
     def parse_mm_data(self, mm_data: MultiModalDataDict) -> MultiModalDataItems:
